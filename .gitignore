@@ -1,0 +1,6 @@
+.venv/
+__pycache__/
+.ipynb_checkpoints/
+# raw downloads and everything the notebooks generate from them
+data/raw/
+data/worlds/

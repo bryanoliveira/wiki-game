@@ -1,0 +1,665 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Wiki game tasks</title>
+<!--
+  Task viewer for the wiki-game benchmark. Serve the repository root and open /viewer/:
+      uv run python -m http.server 8000      ->  http://localhost:8000/viewer/
+  It reads data/worlds/<world>/ written by notebooks/01 and notebooks/02.
+  Every oracle value (cost-to-go, bits-to-go) comes from those files. This page only does the per-step
+  arithmetic defined in wikigame/metrics.py (regret = 1 + cost_after - cost_before, gain = bits_before - bits_after).
+-->
+<style>
+:root {
+  color-scheme: light;
+  --page: #f9f9f7; --surface: #fcfcfb; --ink: #0b0b0b; --ink2: #52514e; --muted: #898781;
+  --grid: #e1e0d9; --axis: #c3c2b7; --border: rgba(11,11,11,0.10);
+  --blue: #2a78d6; --blue-wash: #cde2fb; --red: #e34948; --red-soft: #f2a3a2; --red-wash: #fbe1e0; --mid: #f0efec;
+  --seq-lo: #cde2fb; --seq-hi: #104281;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+    --page: #0d0d0d; --surface: #1a1a19; --ink: #f0efec; --ink2: #c3c2b7; --muted: #898781;
+    --grid: #2c2c2a; --axis: #383835; --border: rgba(255,255,255,0.10);
+    --blue: #3987e5; --blue-wash: #17304f; --red: #e66767; --red-soft: #a34a4a; --red-wash: #3a1f1f; --mid: #383835;
+    --seq-lo: #184f95; --seq-hi: #cde2fb;
+  }
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --page: #0d0d0d; --surface: #1a1a19; --ink: #f0efec; --ink2: #c3c2b7; --muted: #898781;
+  --grid: #2c2c2a; --axis: #383835; --border: rgba(255,255,255,0.10);
+  --blue: #3987e5; --blue-wash: #17304f; --red: #e66767; --red-soft: #a34a4a; --red-wash: #3a1f1f; --mid: #383835;
+  --seq-lo: #184f95; --seq-hi: #cde2fb;
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--page); color: var(--ink); font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
+header { display: flex; flex-wrap: wrap; gap: 12px 20px; align-items: center; padding: 12px 20px; border-bottom: 1px solid var(--border); background: var(--surface); position: sticky; top: 0; z-index: 5; }
+header h1 { font-size: 15px; margin: 0; font-weight: 600; }
+header .spacer { flex: 1; }
+#taskSel { max-width: 100%; min-width: 0; }
+select, button { font: inherit; color: var(--ink); background: var(--surface); border: 1px solid var(--axis); border-radius: 6px; padding: 4px 8px; }
+button { cursor: pointer; }
+button:hover:not(:disabled) { background: var(--mid); }
+button:disabled { opacity: .45; cursor: default; }
+.seg { display: inline-flex; border: 1px solid var(--axis); border-radius: 6px; overflow: hidden; }
+.seg button { border: 0; border-radius: 0; }
+.seg button[aria-pressed="true"] { background: var(--ink); color: var(--surface); }
+main { max-width: 1440px; margin: 0 auto; padding: 16px 20px 48px; display: grid; gap: 16px; }
+.card { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 14px 16px; min-width: 0; }
+.card h2 { font-size: 13px; font-weight: 600; margin: 0 0 2px; }
+.card .sub { color: var(--ink2); font-size: 12.5px; margin: 0 0 10px; }
+.task-title { font-size: 22px; font-weight: 600; margin: 0 0 4px; }
+.task-title .arrow { color: var(--muted); padding: 0 6px; }
+.tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 10px; margin-top: 10px; }
+.tile { border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; }
+.tile .k { color: var(--ink2); font-size: 12px; }
+.tile .v { font-size: 20px; font-weight: 600; }
+.tile .v small { font-size: 12px; font-weight: 400; color: var(--ink2); }
+.two { display: grid; grid-template-columns: minmax(0, 1.05fr) minmax(0, 1fr); gap: 16px; align-items: start; }
+@media (max-width: 1000px) { .two { grid-template-columns: 1fr; } }
+#graph { overflow-x: auto; }
+#graph svg { display: block; }
+.legend { display: flex; flex-wrap: wrap; gap: 4px 16px; color: var(--ink2); font-size: 12px; margin: 4px 0 8px; }
+.legend i { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 5px; vertical-align: -1px; }
+.legend i.line { border-radius: 2px; height: 3px; width: 16px; vertical-align: 2px; }
+#tip { position: fixed; pointer-events: none; z-index: 20; background: var(--surface); border: 1px solid var(--border); box-shadow: 0 4px 16px rgba(0,0,0,.12); border-radius: 8px; padding: 8px 10px; font-size: 12.5px; max-width: 320px; display: none; }
+#tip b { font-weight: 600; }
+#tip .row { display: flex; justify-content: space-between; gap: 16px; color: var(--ink2); }
+#tip .row span:last-child { color: var(--ink); font-variant-numeric: tabular-nums; }
+/* agent view */
+.obs-head { font-size: 13px; color: var(--ink2); margin-bottom: 8px; }
+.obs-head b { color: var(--ink); }
+.chunkmap { display: flex; gap: 2px; margin: 6px 0 10px; flex-wrap: wrap; }
+.chunkmap div { min-width: 26px; height: 22px; border-radius: 4px; font-size: 11px; display: grid; place-items: center; font-variant-numeric: tabular-nums; border: 2px solid transparent; }
+.chunkmap div.cur { border-color: var(--ink); }
+.obs { white-space: pre-wrap; font-size: 13.5px; line-height: 1.55; border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; max-height: 460px; overflow: auto; background: var(--page); }
+.obs a { color: var(--ink); text-decoration: underline; text-decoration-color: var(--muted); cursor: pointer; border-radius: 3px; padding: 0 1px; }
+.obs a:hover { background: var(--mid); }
+.oracle .obs a.r0 { color: var(--blue); background: var(--blue-wash); text-decoration-color: var(--blue); }
+.oracle .obs a.r1 { background: var(--red-wash); text-decoration-color: var(--red-soft); }
+.oracle .obs a.r2 { background: var(--red-wash); color: var(--red); text-decoration-color: var(--red); }
+.oracle .obs a.rx { color: var(--muted); text-decoration: line-through; }
+.obs a sup { display: none; font-size: 9.5px; margin-left: 1px; font-variant-numeric: tabular-nums; }
+.oracle .obs a sup { display: inline; }
+.obs.raw { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
+.controls { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 10px 0; }
+.controls label { color: var(--ink2); font-size: 13px; display: inline-flex; gap: 6px; align-items: center; }
+.state-line { font-size: 13px; color: var(--ink2); margin: 6px 0; }
+.state-line b { color: var(--ink); font-variant-numeric: tabular-nums; }
+.calc { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; color: var(--ink2); background: var(--page); border-radius: 6px; padding: 6px 8px; overflow-x: auto; white-space: nowrap; }
+.banner { padding: 8px 10px; border-radius: 8px; background: var(--blue-wash); margin: 8px 0; font-weight: 500; }
+details summary { cursor: pointer; color: var(--ink2); font-size: 13px; margin-top: 8px; }
+table { border-collapse: collapse; width: 100%; font-size: 12.5px; }
+th { text-align: left; font-weight: 500; color: var(--ink2); border-bottom: 1px solid var(--axis); padding: 4px 6px; white-space: nowrap; }
+td { border-bottom: 1px solid var(--grid); padding: 3px 6px; font-variant-numeric: tabular-nums; }
+td.num, th.num { text-align: right; }
+tr.bad td { background: var(--red-wash); }
+.tablewrap { max-height: 360px; overflow: auto; margin-top: 8px; }
+.charts { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 10px; }
+@media (max-width: 560px) { .charts { grid-template-columns: 1fr; } }
+.charts h3 { font-size: 12.5px; font-weight: 500; margin: 0; color: var(--ink2); }
+.charts svg { width: 100%; display: block; }
+.defs { font-size: 13px; color: var(--ink2); }
+.defs dt { color: var(--ink); font-weight: 600; margin-top: 8px; }
+.defs dd { margin: 2px 0 0 0; }
+.err { color: var(--red); }
+@media (max-width: 640px) { main { padding: 12px 16px 40px; } header { padding: 10px 16px; } }
+</style>
+</head>
+<body>
+<header>
+  <h1>Wiki game · task viewer</h1>
+  <select id="taskSel" aria-label="Task"></select>
+  <span class="spacer"></span>
+  <span style="color:var(--ink2);font-size:13px">Cost model</span>
+  <div class="seg" id="modelSeg">
+    <button data-m="actions" aria-pressed="true" title="One chunk visible; clicks and scrolls each cost 1">Actions</button>
+    <button data-m="clicks" aria-pressed="false" title="Whole page visible; each click costs 1">Clicks</button>
+  </div>
+</header>
+<main>
+  <section class="card" id="summary"></section>
+  <section class="card">
+    <h2>Shortest paths from start to target</h2>
+    <p class="sub" id="graphSub"></p>
+    <div class="legend" id="graphLegend"></div>
+    <div id="graph"></div>
+  </section>
+  <div class="two">
+    <section class="card" id="play">
+      <h2>Agent view</h2>
+      <p class="sub">What the agent sees: one chunk of the current page. Click a link or scroll to play the task yourself.</p>
+      <div id="playBody"></div>
+    </section>
+    <section class="card" id="traj">
+      <h2>Trajectory metrics</h2>
+      <p class="sub">Score any trajectory with the oracle. Pick your own play, the optimal trajectory, or a game a person played on Wikispeedia.</p>
+      <div class="controls"><select id="trajSel" aria-label="Trajectory"></select></div>
+      <div id="trajBody"></div>
+    </section>
+  </div>
+  <section class="card defs">
+    <h2>How the numbers are computed</h2>
+    <dl>
+      <dt>Cost to go</dt>
+      <dd>The fewest steps from the current state to the target. In the <b>clicks</b> model the player sees the whole page and each click costs 1, so the cost to go is the shortest-path length <i>d</i> in the link graph. In the <b>actions</b> model the player sees one chunk of about 2,000 characters, and each click or scroll costs 1. The state is then (page, chunk) and the cost to go is <i>V</i>.</dd>
+      <dt>Regret of a step</dt>
+      <dd>1 + cost to go after − cost to go before. It is 0 for an optimal step. Over a finished game the regrets add up to steps taken − optimal steps.</dd>
+      <dt>Bits to go, φ</dt>
+      <dd>Take a player who picks uniformly at random among the available actions. Let <i>P</i> be the probability that it follows an optimal path from here. Then φ = −log₂ <i>P</i>, computed exactly by P(x) = (1/n)·Σ P(next) over the optimal actions. It is the information a player must supply to play optimally from here.</dd>
+      <dt>Bits gained by a step</dt>
+      <dd>φ before − φ after. With <i>k</i> optimal actions out of <i>n</i>, a random pick needs log₂(n/k) bits (the "chance bits"). Along any game that reaches the target the gains add up to φ(start), so the total is fixed by the task.</dd>
+      <dt>Regret and bits measure different things</dt>
+      <dd>Regret counts wasted steps. Bits count how much easier the remaining choice became. A step that moves farther from the target loses bits. A step that keeps the same distance can still gain bits when it lands on a page with many good links, such as a hub like <i>Europe</i>. People often play this way: the detour costs a step but makes the rest of the game surer. So a game can have steps with regret and lose no bits.</dd>
+      <dt>Efficiency</dt>
+      <dd>Optimal steps divided by steps taken, for a game that reached the target (1 is perfect). A game that did not reach it scores 0.</dd>
+    </dl>
+    <p>Definitions and the exact computation: <code>wikigame/metrics.py</code>.</p>
+  </section>
+</main>
+<div id="tip"></div>
+
+<script>
+const DATA = "../data/worlds/wikispeedia/";
+const $ = (s, el = document) => el.querySelector(s);
+const esc = s => String(s).replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+const fmt = (x, d = 1) => x === null || x === undefined || !isFinite(x) ? "∞" : Number(x).toFixed(d);
+const fmtInt = x => x === null || x === undefined ? "–" : Number(x).toLocaleString("en-US");
+const pct = x => x === null || x === undefined ? "–" : Math.round(100 * x) + "%";
+
+let W, INDEX, T, OFF;               // world, task index, current task, state offsets
+let model = "actions";
+const pageCache = new Map();
+let play = null;                    // { p, c, actions: [[kind, q]], pages: [...] }
+let oracleOn = true, rawObs = false;
+let outCache = new Map();
+
+// ---------------------------------------------------------------- data access
+async function getJSON(path) {
+  const r = await fetch(DATA + path);
+  if (!r.ok) throw new Error(`${r.status} for ${path}`);
+  return r.json();
+}
+async function getPage(p) {
+  if (!pageCache.has(p)) pageCache.set(p, await getJSON(`pages/${p}.json`));
+  return pageCache.get(p);
+}
+const name = p => W.names[p];
+const nChunks = p => W.chunk_links[p].length;
+const sid = (p, c) => OFF[p] + c;
+const bitsOf = v => (v === null ? Infinity : v);
+function outLinks(p) {
+  if (!outCache.has(p)) outCache.set(p, [...new Set(W.chunk_links[p].flat())]);
+  return outCache.get(p);
+}
+// cost to go / bits to go of a page (clicks model) or a state (actions model)
+const pageCost = p => T.page_cost[p];
+const pageBits = p => bitsOf(T.page_bits[p]);
+const stateCost = (p, c) => (p === T.target ? 0 : T.state_cost[sid(p, c)]);
+const stateBits = (p, c) => (p === T.target ? 0 : bitsOf(T.state_bits[sid(p, c)]));
+
+// available actions in a state, with where they lead (actions model)
+function stateActions(p, c) {
+  const acts = W.chunk_links[p][c].map(q => ({ kind: "click", q, to: [q, 0] }));
+  if (c + 1 < nChunks(p)) acts.push({ kind: "scroll_down", q: -1, to: [p, c + 1] });
+  if (c > 0) acts.push({ kind: "scroll_up", q: -1, to: [p, c - 1] });
+  return acts;
+}
+// regret of moving from cost a to cost b (null when either end has no path)
+const regretOf = (a, b) => (a < 0 || b < 0 ? null : 1 + b - a);
+
+// ---------------------------------------------------------------- scoring (mirrors wikigame/metrics.py)
+function stepRecord(costB, costA, bitsB, bitsA, n, k) {
+  const regret = regretOf(costB, costA);
+  return { costB, costA, regret, optimal: regret === 0, n, k, chance: k ? Math.log2(n / k) : Infinity, bitsB, bitsA, gain: bitsB - bitsA };
+}
+function scorePages(pages) {
+  const steps = [];
+  for (let i = 0; i + 1 < pages.length; i++) {
+    const p = pages[i], q = pages[i + 1], outs = outLinks(p);
+    const k = outs.filter(x => pageCost(x) >= 0 && pageCost(x) === pageCost(p) - 1).length;
+    steps.push({ i: i + 1, label: outs.includes(q) ? name(q) : `← back to ${name(q)}`, from: [p, 0], to: [q, 0],
+                 ...stepRecord(pageCost(p), pageCost(q), pageBits(p), pageBits(q), outs.length, k) });
+  }
+  return summarise(steps, pageCost(pages[0]), pageBits(pages[0]), pages[pages.length - 1] === T.target);
+}
+function scoreActions(actions) {
+  let p = T.start, c = 0;
+  const steps = [];
+  for (const [kind, q] of actions) {
+    const acts = stateActions(p, c), costB = stateCost(p, c);
+    const k = acts.filter(a => { const v = stateCost(...a.to); return v >= 0 && v === costB - 1; }).length;
+    const to = kind === "click" ? [q, 0] : kind === "scroll_down" ? [p, c + 1] : [p, c - 1];
+    const label = kind === "click" ? name(q) : kind === "scroll_down" ? `↓ scroll to part ${c + 2}` : `↑ scroll to part ${c}`;
+    steps.push({ i: steps.length + 1, label, from: [p, c], to,
+                 ...stepRecord(costB, stateCost(...to), stateBits(p, c), stateBits(...to), acts.length, k) });
+    [p, c] = to;
+    if (p === T.target) break;
+  }
+  return summarise(steps, stateCost(T.start, 0), stateBits(T.start, 0), p === T.target);
+}
+function summarise(steps, optimal, bitsNeeded, success) {
+  const n = steps.length;
+  const err = steps.find(s => !s.optimal);
+  return { steps, success, n, optimal, regret: success ? n - optimal : null, efficiency: success && n ? optimal / n : 0,
+           bitsNeeded, bitsLost: steps.reduce((a, s) => a + (s.gain < 0 && isFinite(s.gain) ? -s.gain : 0), 0),
+           firstError: err ? err.i : null };
+}
+// page sequence of an action list (for the clicks view of an actions trajectory)
+const pagesOf = actions => [T.start, ...actions.filter(a => a[0] === "click").map(a => a[1])];
+
+// ---------------------------------------------------------------- tooltip
+const tip = $("#tip");
+function showTip(ev, html) {
+  tip.innerHTML = html; tip.style.display = "block";
+  const r = tip.getBoundingClientRect();
+  let x = ev.clientX + 14, y = ev.clientY + 14;
+  if (x + r.width > innerWidth - 8) x = ev.clientX - r.width - 14;
+  if (y + r.height > innerHeight - 8) y = ev.clientY - r.height - 14;
+  tip.style.left = x + "px"; tip.style.top = y + "px";
+}
+const hideTip = () => (tip.style.display = "none");
+const tipRows = rows => rows.map(([k, v]) => `<div class="row"><span>${k}</span><span>${v}</span></div>`).join("");
+
+function pageProfile(p) {
+  const outs = outLinks(p), d = pageCost(p);
+  let closer = 0, same = 0, farther = 0, none = 0;
+  for (const q of outs) {
+    const e = pageCost(q);
+    if (e < 0) none++; else if (d >= 0 && e < d) closer++; else if (e === d) same++; else farther++;
+  }
+  return { n: outs.length, closer, same, farther, none };
+}
+function nodeTip(p) {
+  const pr = pageProfile(p);
+  return `<b>${esc(name(p))}</b>` + tipRows([
+    ["clicks to target (d)", pageCost(p) < 0 ? "no path" : pageCost(p)],
+    ["actions to target from the top (V)", stateCost(p, 0) < 0 ? "no path" : stateCost(p, 0)],
+    ["bits to go, clicks model", fmt(pageBits(p))],
+    ["bits to go, actions model", fmt(stateBits(p, 0))],
+    ["parts (chunks) of the page", nChunks(p)],
+    ["links: closer / same / farther", `${pr.closer} / ${pr.same} / ${pr.farther + pr.none}`],
+    ...(T.dag_through[p] ? [["shortest paths through it", fmtInt(T.dag_through[p])]] : []),
+  ]);
+}
+
+// ---------------------------------------------------------------- summary
+function renderSummary() {
+  const t = T;
+  const human = t.human_games
+    ? `<div class="tile"><div class="k">People on Wikispeedia</div><div class="v">${pct(t.human_success)} <small>of ${fmtInt(t.human_games)} games finished</small></div><div class="k">efficiency of finished games ${fmt(t.human_efficiency, 2)}</div></div>`
+    : `<div class="tile"><div class="k">People on Wikispeedia</div><div class="v"><small>not played (random task)</small></div></div>`;
+  $("#summary").innerHTML = `
+    <p class="task-title">${esc(t.start_name)}<span class="arrow">→</span>${esc(t.target_name)}</p>
+    <div class="tiles">
+      <div class="tile"><div class="k">Fewest clicks (whole page visible)</div><div class="v">${t.d_star}</div><div class="k">${fmtInt(t.n_shortest_paths)} shortest path${t.n_shortest_paths === 1 ? "" : "s"}</div></div>
+      <div class="tile"><div class="k">Fewest actions (one chunk visible)</div><div class="v">${t.V_star}</div><div class="k">clicks and scrolls, ${INDEX.chunk_chars.toLocaleString("en-US")} characters per chunk</div></div>
+      <div class="tile"><div class="k">Bits needed, clicks model</div><div class="v">${fmt(t.bits_click)}</div><div class="k">random clicker plays optimally with p = 2<sup>−${fmt(t.bits_click)}</sup></div></div>
+      <div class="tile"><div class="k">Bits needed, actions model</div><div class="v">${fmt(t.bits_action)}</div><div class="k">random agent plays optimally with p = 2<sup>−${fmt(t.bits_action)}</sup></div></div>
+      ${human}
+    </div>`;
+}
+
+// ---------------------------------------------------------------- graph
+let graphTraj = null; // pages of the selected trajectory, drawn over the graph
+function renderGraph() {
+  const host = $("#graph");
+  const D = T.d_star;
+  const onDag = new Map();
+  T.dag_layers.forEach((L, k) => L.forEach((v, j) => onDag.set(v, [k, j])));
+  const traj = graphTraj || [];
+  // column of a page = progress = d* - d(page); pages with no path go in a column left of everything
+  const colOf = p => (pageCost(p) < 0 ? null : D - pageCost(p));
+  const extraCols = traj.map(colOf).filter(c => c !== null);
+  const minCol = Math.min(0, ...extraCols);
+  const hasNoPath = traj.some(p => colOf(p) === null);
+  const firstCol = minCol - (hasNoPath ? 1 : 0);
+  const nCols = D - firstCol + 1;
+  const off = [...new Set(traj.filter(p => !onDag.has(p)))];
+  const offRows = {};
+  off.forEach(p => { const c = colOf(p) ?? firstCol; (offRows[c] ||= []).push(p); });
+  const maxOff = Math.max(0, ...Object.values(offRows).map(a => a.length));
+  const rowH = 18, maxLayer = Math.max(...T.dag_layers.map(L => L.length));
+  const width = Math.max(host.clientWidth, 120 * (nCols - 1) + 170);
+  const padL = 18, padR = 150, top = 34;
+  const dagH = maxLayer * rowH;
+  const offRowH = 30;
+  const offTop = top + dagH + (maxOff ? 40 : 0);
+  const height = offTop + maxOff * offRowH + 10;
+  const colW = nCols > 1 ? (width - padL - padR) / (nCols - 1) : 0;
+  const xOf = col => padL + (col - firstCol) * colW + (nCols === 1 ? (width - padL - padR) / 2 : 0);
+  const pos = new Map();
+  T.dag_layers.forEach((L, k) => {
+    const y0 = top + (dagH - L.length * rowH) / 2 + rowH / 2;
+    L.forEach((v, j) => pos.set(v, [xOf(k), y0 + j * rowH]));
+  });
+  for (const [c, arr] of Object.entries(offRows)) arr.forEach((p, j) => pos.set(p, [xOf(+c), offTop + j * offRowH + offRowH * 0.6]));
+  const offSet = new Set(off);
+  const maxThrough = Math.max(...Object.values(T.dag_through));
+  const rOf = p => (T.dag_through[p] ? 3 + 6 * Math.sqrt(T.dag_through[p] / maxThrough) : 4);
+  const maxChars = Math.max(6, Math.floor((nCols > 1 ? Math.min(colW, padR + 40) : padR) / 6.4) - 3);
+  const short = s => (s.length > maxChars ? s.slice(0, maxChars - 1) + "…" : s);
+  const inTraj = new Set(traj);
+
+  let s = `<svg viewBox="0 0 ${width} ${height}" width="${width}" height="${height}" role="img" aria-label="Pages on shortest paths from ${esc(T.start_name)} to ${esc(T.target_name)}">`;
+  // column headers
+  for (let c = firstCol; c <= D; c++) {
+    const label = c === null ? "" : c < 0 ? `${-c} click${c === -1 ? "" : "s"} farther than start` : c === 0 ? "start" : c === D ? "target" : `after ${c} click${c > 1 ? "s" : ""}`;
+    const sizeNote = c >= 0 && c <= D && T.dag_layer_sizes[c] > T.dag_layers[c].length ? ` · ${T.dag_layers[c].length} of ${T.dag_layer_sizes[c]}` : "";
+    const txt = hasNoPath && c === firstCol ? "no path to target" : label + sizeNote;
+    s += `<text x="${xOf(c)}" y="14" font-size="11" fill="var(--muted)" text-anchor="${c === D && nCols > 1 ? "middle" : "start"}">${esc(txt)}</text>`;
+    s += `<line x1="${xOf(c)}" x2="${xOf(c)}" y1="20" y2="${height - 6}" stroke="var(--grid)" stroke-dasharray="2 3"/>`;
+  }
+  if (maxOff) s += `<line x1="${padL}" x2="${width - 10}" y1="${offTop - 22}" y2="${offTop - 22}" stroke="var(--grid)"/><text x="${padL + 12}" y="${offTop - 8}" font-size="11" fill="var(--muted)">visited pages that are not on a shortest path</text>`;
+  // DAG edges
+  for (const [a, b] of T.dag_edges) {
+    const [x1, y1] = pos.get(a), [x2, y2] = pos.get(b);
+    s += `<path d="M${x1},${y1} C${(x1 + x2) / 2},${y1} ${(x1 + x2) / 2},${y2} ${x2},${y2}" fill="none" stroke="var(--axis)" stroke-width="1" opacity=".7"/>`;
+  }
+  // trajectory
+  if (traj.length > 1) {
+    let d = "";
+    traj.forEach((p, i) => { const [x, y] = pos.get(p); d += (i ? " L" : "M") + `${x},${y}`; });
+    s += `<path d="${d}" fill="none" stroke="var(--blue)" stroke-width="2.5" stroke-linejoin="round" opacity=".9"/>`;
+    traj.forEach((p, i) => {
+      if (!i) return;
+      const [x1, y1] = pos.get(traj[i - 1]), [x2, y2] = pos.get(p);
+      const mx = (x1 + x2) / 2, my = (y1 + y2) / 2;
+      s += `<circle cx="${mx}" cy="${my}" r="7.5" fill="var(--surface)" stroke="var(--blue)" stroke-width="1.5"/><text x="${mx}" y="${my + 3.5}" font-size="9.5" text-anchor="middle" fill="var(--ink)">${i}</text>`;
+    });
+  }
+  // nodes
+  const nodes = [...pos.keys()];
+  for (const p of nodes) {
+    const [x, y] = pos.get(p);
+    const special = p === T.start || p === T.target;
+    const hot = inTraj.has(p);
+    const fill = hot ? "var(--blue)" : special ? "var(--ink)" : "var(--surface)";
+    const stroke = hot ? "var(--surface)" : special ? "var(--surface)" : "var(--ink2)";
+    s += `<g class="node" data-p="${p}" style="cursor:pointer">
+      <circle cx="${x}" cy="${y}" r="${Math.max(rOf(p), 9)}" fill="transparent"/>
+      <circle cx="${x}" cy="${y}" r="${rOf(p)}" fill="${fill}" stroke="${stroke}" stroke-width="${hot || special ? 2 : 1}"/>
+      <text x="${x + rOf(p) + 4}" y="${offSet.has(p) ? y - 7 : y + 4}" font-size="11.5" fill="${hot || special ? "var(--ink)" : "var(--ink2)"}" font-weight="${special || hot ? 600 : 400}">${esc(short(name(p)))}</text>
+    </g>`;
+  }
+  s += "</svg>";
+  host.innerHTML = s;
+  host.querySelectorAll(".node").forEach(g => {
+    const p = +g.dataset.p;
+    g.addEventListener("mousemove", ev => showTip(ev, nodeTip(p)));
+    g.addEventListener("mouseleave", hideTip);
+  });
+  $("#graphSub").textContent =
+    `Every page on at least one shortest click path from ${T.start_name} to ${T.target_name}, placed by how many clicks it is from the start. ` +
+    `Hover a page for its oracle values. The selected trajectory is drawn on top, with its steps numbered.`;
+  $("#graphLegend").innerHTML =
+    `<span><i style="background:var(--ink)"></i>start and target</span>` +
+    `<span><i style="background:var(--surface);border:1px solid var(--ink2)"></i>page on a shortest path (size = number of shortest paths through it)</span>` +
+    `<span><i class="line" style="background:var(--blue)"></i>selected trajectory</span>`;
+}
+
+// ---------------------------------------------------------------- agent view (play)
+function resetPlay() { play = { p: T.start, c: 0, actions: [] }; }
+function regretClass(r) { return r === null ? "rx" : r === 0 ? "r0" : r === 1 ? "r1" : "r2"; }
+function linkRegret(p, c, q) {
+  return model === "clicks" ? regretOf(pageCost(p), pageCost(q)) : regretOf(stateCost(p, c), stateCost(q, 0));
+}
+function observationText(page, p, c) {
+  const k = page.chunks.length, more = [];
+  if (c > 0) more.push("scroll up for the previous part");
+  if (c + 1 < k) more.push("scroll down for more");
+  const [a, b] = page.chunks[c];
+  let body = "", pos = a;
+  for (const [s, e, q, cc] of page.links) {
+    if (cc !== c) continue;
+    body += page.text.slice(pos, s) + `[${page.text.slice(s, e)}](${name(q)})`;
+    pos = e;
+  }
+  body += page.text.slice(pos, b);
+  return [
+    `Goal: reach the Wikipedia page "${T.target_name}" by following links, in as few actions as possible.`,
+    `You are on "${page.name}", part ${c + 1} of ${k}` + (more.length ? ` (${more.join("; ")}).` : "."),
+    `Actions used: ${play.actions.length}.`, "-----", body, "-----",
+    `Reply with one action: click("Page name") for a link shown above, scroll_down(), or scroll_up().`,
+  ].join("\n");
+}
+function chunkHTML(page, p, c) {
+  const [a, b] = page.chunks[c];
+  let html = "", pos = a;
+  for (const [s, e, q, cc] of page.links) {
+    if (cc !== c) continue;
+    html += esc(page.text.slice(pos, s));
+    const r = q === p ? null : linkRegret(p, c, q);
+    const badge = q === p ? "" : r === null ? "×" : r === 0 ? "✓" : "+" + r;
+    html += `<a data-q="${q}" class="${q === p ? "rx" : regretClass(r)}" title="${esc(name(q))}">${esc(page.text.slice(s, e))}<sup>${badge}</sup></a>`;
+    pos = e;
+  }
+  return html + esc(page.text.slice(pos, b));
+}
+function seqColor(v, vmax) {
+  if (v < 0) return "var(--mid)";
+  const t = vmax ? Math.min(1, v / vmax) : 0;
+  return `color-mix(in oklab, var(--seq-hi) ${Math.round(100 * (1 - t))}%, var(--seq-lo))`;
+}
+async function renderPlay() {
+  const body = $("#playBody");
+  body.classList.toggle("oracle", oracleOn);
+  const { p, c } = play;
+  const page = await getPage(p);
+  if (play.p !== p) return; // a newer render started
+  const done = p === T.target;
+  const k = page.chunks.length;
+  const acts = done ? [] : stateActions(p, c);
+  const costHere = model === "clicks" ? pageCost(p) : stateCost(p, c);
+  const bitsHere = model === "clicks" ? pageBits(p) : stateBits(p, c);
+  // actions available now and what each one does (the calculation behind bits to go)
+  let rows;
+  if (model === "clicks") {
+    rows = outLinks(p).map(q => ({ label: name(q), cost: pageCost(q), bits: pageBits(q) }));
+  } else {
+    rows = acts.map(a => ({ label: a.kind === "click" ? name(a.q) : a.kind === "scroll_down" ? "↓ scroll down" : "↑ scroll up", cost: stateCost(...a.to), bits: stateBits(...a.to) }));
+  }
+  rows.forEach(r => (r.regret = regretOf(costHere, r.cost)));
+  rows.sort((x, y) => (x.regret ?? 99) - (y.regret ?? 99) || x.bits - y.bits);
+  const opt = rows.filter(r => r.regret === 0);
+  const sumP = opt.reduce((s, r) => s + Math.pow(2, -r.bits), 0);
+  const calc = done ? "" : opt.length
+    ? `φ = −log₂[(1/${rows.length}) · (${opt.slice(0, 4).map(r => `2^−${fmt(r.bits, 2)}`).join(" + ")}${opt.length > 4 ? ` + … ${opt.length - 4} more` : ""})] = −log₂(${(sumP / rows.length).toExponential(2)}) = ${fmt(bitsHere, 2)} bits`
+    : `No action from here leads to the target, so φ = ∞.`;
+  const vmax = Math.max(1, ...Array.from({ length: k }, (_, i) => stateCost(p, i)));
+  const chunkmap = Array.from({ length: k }, (_, i) => {
+    const v = stateCost(p, i);
+    const light = v >= 0 && v / vmax > 0.55;
+    return `<div class="${i === c ? "cur" : ""}" style="background:${seqColor(v, vmax)};color:${light ? "var(--ink)" : "var(--surface)"}" title="part ${i + 1}: ${v < 0 ? "no path" : v + " actions to target"}">${v < 0 ? "×" : v}</div>`;
+  }).join("");
+
+  body.innerHTML = `
+    ${done ? `<div class="banner">Reached ${esc(T.target_name)} in ${play.actions.length} actions (${pagesOf(play.actions).length - 1} clicks). The optimum is ${T.V_star} actions, ${T.d_star} clicks.</div>` : ""}
+    <div class="obs-head">Goal <b>${esc(T.target_name)}</b> · on <b>${esc(page.name)}</b>, part <b>${c + 1}</b> of ${k} · actions used <b>${play.actions.length}</b></div>
+    ${oracleOn ? `<div class="state-line">Actions to target from each part of this page (current part outlined):</div><div class="chunkmap">${chunkmap}</div>` : ""}
+    <div class="obs ${rawObs ? "raw" : ""}">${rawObs ? esc(observationText(page, p, c)) : chunkHTML(page, p, c)}</div>
+    <div class="controls">
+      <button id="bUp" ${c === 0 || done ? "disabled" : ""}>↑ Scroll up</button>
+      <button id="bDown" ${c + 1 >= k || done ? "disabled" : ""}>↓ Scroll down</button>
+      <button id="bUndo" ${play.actions.length ? "" : "disabled"}>Undo</button>
+      <button id="bReset">Restart</button>
+      <label><input type="checkbox" id="cOracle" ${oracleOn ? "checked" : ""}> show oracle</label>
+      <label><input type="checkbox" id="cRaw" ${rawObs ? "checked" : ""}> raw observation text</label>
+    </div>
+    ${oracleOn && !done ? `
+      <div class="legend">
+        <span><i style="background:var(--blue)"></i>✓ optimal link</span>
+        <span><i style="background:var(--red-soft)"></i>+1 one step of regret</span>
+        <span><i style="background:var(--red)"></i>+2 or more</span>
+        <span><i style="background:var(--muted)"></i>× no path to target</span>
+      </div>
+      <div class="state-line">Here (${model === "clicks" ? "clicks model: whole page" : "actions model: this part"}): cost to go <b>${costHere < 0 ? "no path" : costHere}</b> · bits to go <b>${fmt(bitsHere, 2)}</b> ·
+        <b>${opt.length}</b> of <b>${rows.length}</b> actions are optimal, so a random pick needs <b>${opt.length ? fmt(Math.log2(rows.length / opt.length), 2) : "∞"}</b> bits</div>
+      <div class="calc">${calc}</div>
+      <details><summary>All ${rows.length} available actions, best first</summary>
+        <div class="tablewrap"><table><thead><tr><th>action</th><th class="num">cost to go after</th><th class="num">regret</th><th class="num">bits to go after</th><th class="num">bits gained</th></tr></thead>
+        <tbody>${rows.map(r => `<tr class="${r.regret === 0 ? "" : "bad"}"><td>${esc(r.label)}</td><td class="num">${r.cost < 0 ? "–" : r.cost}</td><td class="num">${r.regret ?? "–"}</td><td class="num">${fmt(r.bits, 2)}</td><td class="num">${fmt(bitsHere - r.bits, 2)}</td></tr>`).join("")}</tbody></table></div>
+      </details>` : ""}`;
+  body.querySelectorAll(".obs a").forEach(a => a.addEventListener("click", () => {
+    const q = +a.dataset.q;
+    if (q === play.p || done) return;
+    act(["click", q]);
+  }));
+  $("#bUp").onclick = () => act(["scroll_up", -1]);
+  $("#bDown").onclick = () => act(["scroll_down", -1]);
+  $("#bUndo").onclick = () => { play.actions.pop(); replayPlay(); };
+  $("#bReset").onclick = () => { resetPlay(); afterPlayChange(); };
+  $("#cOracle").onchange = e => { oracleOn = e.target.checked; renderPlay(); };
+  $("#cRaw").onchange = e => { rawObs = e.target.checked; renderPlay(); };
+}
+function act(a) {
+  play.actions.push(a);
+  replayPlay();
+}
+function replayPlay() {
+  let p = T.start, c = 0;
+  for (const [kind, q] of play.actions) {
+    if (kind === "click") { p = q; c = 0; } else if (kind === "scroll_down") c++; else c--;
+  }
+  play.p = p; play.c = c;
+  afterPlayChange();
+}
+function afterPlayChange() {
+  if ($("#trajSel").value !== "play") $("#trajSel").value = "play";
+  renderPlay();
+  renderTraj();
+}
+
+// ---------------------------------------------------------------- trajectories
+function trajectoryOptions() {
+  const sel = $("#trajSel");
+  const opts = [`<option value="play">Your play</option>`, `<option value="optimal">Optimal trajectory (fewest actions)</option>`];
+  if (T.humans.length) {
+    opts.push(`<optgroup label="People on Wikispeedia (first ${T.humans.length} games)">`);
+    T.humans.forEach((h, i) => opts.push(`<option value="h${i}">Person ${i + 1} · ${h.finished ? "finished" : "gave up"} · ${h.pages.length - 1} clicks · ${h.seconds} s</option>`));
+    opts.push("</optgroup>");
+  }
+  sel.innerHTML = opts.join("");
+  sel.onchange = renderTraj;
+}
+function currentTrajectory() {
+  const v = $("#trajSel").value;
+  if (v === "play") return { actions: play.actions };
+  if (v === "optimal") return { actions: T.optimal_actions };
+  return { pages: T.humans[+v.slice(1)].pages, human: true };
+}
+function renderTraj() {
+  const tr = currentTrajectory();
+  const useClicks = model === "clicks" || tr.human;
+  const pages = tr.pages || pagesOf(tr.actions);
+  const sc = useClicks ? scorePages(pages) : scoreActions(tr.actions);
+  graphTraj = pages;
+  renderGraph();
+  const unit = useClicks ? "clicks" : "actions";
+  const note = tr.human && model === "actions"
+    ? `<p class="sub">People saw the whole page, so their games are scored in the clicks model.</p>` : "";
+  const tiles = [
+    ["Reached the target", sc.success ? "yes" : "no", ""],
+    [`${unit[0].toUpperCase() + unit.slice(1)} taken`, sc.n, `optimum ${sc.optimal}`],
+    ["Efficiency", sc.success ? fmt(sc.efficiency, 2) : "0", "optimal ÷ taken"],
+    ["Steps with regret", sc.steps.filter(s => !s.optimal).length, sc.firstError ? `first at step ${sc.firstError}` : "every step optimal"],
+    ["Bits needed", fmt(sc.bitsNeeded), "fixed by the task"],
+    ["Bits lost", fmt(sc.bitsLost), "sum of negative gains"],
+  ];
+  $("#trajBody").innerHTML = `${note}
+    <div class="tiles">${tiles.map(([k, v, s]) => `<div class="tile"><div class="k">${k}</div><div class="v">${v}</div>${s ? `<div class="k">${s}</div>` : ""}</div>`).join("")}</div>
+    ${sc.steps.length ? `<div class="charts">
+      <div><h3>Bits to go after each step</h3><div id="chBits"></div></div>
+      <div><h3>${unit[0].toUpperCase() + unit.slice(1)} to go after each step</h3><div id="chCost"></div></div>
+    </div>
+    <div class="tablewrap"><table>
+      <thead><tr><th class="num">#</th><th>step</th><th class="num">to go</th><th class="num">regret</th><th class="num">optimal / available</th><th class="num">chance bits</th><th class="num">bits gained</th><th class="num">bits to go</th></tr></thead>
+      <tbody>${sc.steps.map(s => `<tr class="${s.optimal ? "" : "bad"}"><td class="num">${s.i}</td><td>${esc(s.label)}</td>
+        <td class="num">${s.costB < 0 ? "–" : s.costB}→${s.costA < 0 ? "–" : s.costA}</td><td class="num">${s.regret ?? "–"}</td>
+        <td class="num">${s.k} / ${s.n}</td><td class="num">${fmt(s.chance, 2)}</td><td class="num">${fmt(s.gain, 2)}</td><td class="num">${fmt(s.bitsA, 2)}</td></tr>`).join("")}</tbody>
+    </table></div>` : `<p class="sub" style="margin-top:12px">No steps yet. Play in the agent view, or pick another trajectory.</p>`}`;
+  if (sc.steps.length) {
+    const xs = [0, ...sc.steps.map(s => s.i)];
+    lineChart($("#chBits"), xs, [sc.steps[0].bitsB, ...sc.steps.map(s => s.bitsA)], "bits to go", v => fmt(v, 2), sc.steps);
+    lineChart($("#chCost"), xs, [sc.steps[0].costB, ...sc.steps.map(s => s.costA)].map(v => (v < 0 ? null : v)), `${unit} to go`, v => v, sc.steps);
+  }
+}
+function lineChart(host, xs, ys, label, f, steps) {
+  const w = Math.max(host.clientWidth, 220), h = 150, l = 34, r = 10, t = 10, b = 24;
+  const finite = ys.filter(v => v !== null && isFinite(v));
+  const ymax = Math.max(1, ...finite) * 1.08;
+  const xmax = Math.max(1, xs[xs.length - 1]);
+  const X = x => l + (x / xmax) * (w - l - r), Y = y => t + (1 - y / ymax) * (h - t - b);
+  const ticks = [0, ymax / 2 / 1.08, ymax / 1.08].map(v => +v.toFixed(ymax > 10 ? 0 : 1));
+  let s = `<svg viewBox="0 0 ${w} ${h}" height="${h}" role="img" aria-label="${esc(label)} by step">`;
+  ticks.forEach(v => { s += `<line x1="${l}" x2="${w - r}" y1="${Y(v)}" y2="${Y(v)}" stroke="var(--grid)"/><text x="${l - 5}" y="${Y(v) + 4}" font-size="10.5" text-anchor="end" fill="var(--muted)">${v}</text>`; });
+  s += `<line x1="${l}" x2="${w - r}" y1="${Y(0)}" y2="${Y(0)}" stroke="var(--axis)"/>`;
+  const xticks = xmax <= 12 ? xs : xs.filter(x => x % Math.ceil(xmax / 8) === 0);
+  xticks.forEach(x => { s += `<text x="${X(x)}" y="${h - 8}" font-size="10.5" text-anchor="middle" fill="var(--muted)">${x}</text>`; });
+  let d = "", pen = false;
+  xs.forEach((x, i) => { const y = ys[i]; if (y === null || !isFinite(y)) { pen = false; return; } d += (pen ? " L" : " M") + `${X(x)},${Y(y)}`; pen = true; });
+  s += `<path d="${d}" fill="none" stroke="var(--blue)" stroke-width="2" stroke-linejoin="round"/>`;
+  xs.forEach((x, i) => {
+    const y = ys[i]; if (y === null || !isFinite(y)) return;
+    const bad = i > 0 && !steps[i - 1].optimal;
+    s += `<circle cx="${X(x)}" cy="${Y(y)}" r="4" fill="${bad ? "var(--red)" : "var(--blue)"}" stroke="var(--surface)" stroke-width="2"/>`;
+  });
+  s += `<line class="xh" x1="0" x2="0" y1="${t}" y2="${h - b}" stroke="var(--axis)" visibility="hidden"/><rect x="${l}" y="${t}" width="${w - l - r}" height="${h - t - b}" fill="transparent"/>`;
+  s += "</svg>";
+  host.innerHTML = s;
+  const svg = host.querySelector("svg"), xh = svg.querySelector(".xh");
+  svg.addEventListener("mousemove", ev => {
+    const box = svg.getBoundingClientRect();
+    const px = ((ev.clientX - box.left) / box.width) * w;
+    const i = Math.max(0, Math.min(xs.length - 1, Math.round(((px - l) / (w - l - r)) * xmax)));
+    xh.setAttribute("x1", X(xs[i])); xh.setAttribute("x2", X(xs[i])); xh.setAttribute("visibility", "visible");
+    const st = i > 0 ? steps[i - 1] : null;
+    showTip(ev, `<b>${i === 0 ? "start" : `step ${i}: ${esc(st.label)}`}</b>` + tipRows([[label, ys[i] === null ? "no path" : f(ys[i])], ...(st ? [["regret", st.regret ?? "–"], ["bits gained", fmt(st.gain, 2)]] : [])]));
+  });
+  svg.addEventListener("mouseleave", () => { xh.setAttribute("visibility", "hidden"); hideTip(); });
+}
+
+// ---------------------------------------------------------------- task loading
+async function loadTask(id) {
+  T = await getJSON(`tasks/${id}.json`);
+  location.hash = "task=" + id;
+  $("#taskSel").value = id;
+  resetPlay();
+  trajectoryOptions();
+  renderSummary();
+  renderPlay();
+  renderTraj();
+}
+async function init() {
+  try {
+    [W, INDEX] = await Promise.all([getJSON("world.json"), getJSON("tasks/index.json")]);
+  } catch (e) {
+    $("#summary").innerHTML = `<p class="err">Could not load the data (${esc(e.message)}). Serve the repository root, for example with <code>uv run python -m http.server 8000</code>, and open <code>http://localhost:8000/viewer/</code>. The data is written by notebooks 01 and 02.</p>`;
+    return;
+  }
+  OFF = [0];
+  W.chunk_links.forEach(cl => OFF.push(OFF[OFF.length - 1] + cl.length));
+  const byD = {};
+  INDEX.tasks.forEach(t => (byD[t.d_star] ||= []).push(t));
+  $("#taskSel").innerHTML = Object.keys(byD).sort((a, b) => a - b).map(d =>
+    `<optgroup label="${d} click${d > 1 ? "s" : ""} at best">${byD[d].map(t =>
+      `<option value="${t.id}">${esc(t.start_name)} → ${esc(t.target_name)} · ${t.V_star} actions · ${fmt(t.bits_action)} bits${t.human_games ? "" : " · no human games"}</option>`).join("")}</optgroup>`).join("");
+  $("#taskSel").onchange = e => loadTask(e.target.value);
+  document.querySelectorAll("#modelSeg button").forEach(b => b.addEventListener("click", () => {
+    model = b.dataset.m;
+    document.querySelectorAll("#modelSeg button").forEach(x => x.setAttribute("aria-pressed", x === b));
+    renderPlay(); renderTraj();
+  }));
+  let resizeT;
+  addEventListener("resize", () => { clearTimeout(resizeT); resizeT = setTimeout(renderTraj, 150); });
+  const want = (location.hash.match(/task=([\d-]+)/) || [])[1];
+  await loadTask(INDEX.tasks.some(t => t.id === want) ? want : (INDEX.tasks.find(t => t.start_name === "Asteroid") || INDEX.tasks[0]).id);
+}
+init();
+</script>
+</body>
+</html>
