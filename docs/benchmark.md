@@ -122,4 +122,4 @@ obs, done = env.step('click("Comet")')
 env.score()                          # actions-model and clicks-model summaries
 ```
 
-The environment reads the first action it finds in the reply, so a model may think aloud before it answers.
+The environment applies the last action it finds in the reply, so a model may think aloud before it answers.

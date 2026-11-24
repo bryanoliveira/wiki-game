@@ -74,9 +74,10 @@ class WikiGameEnv:
         return "\n".join(lines)
 
     def step(self, reply: str) -> tuple[str, bool]:
-        """Apply the first action found in the agent's reply."""
+        """Apply the last action found in the agent's reply, so a model may think aloud before it answers."""
         assert not self.done
-        m = ACTION_RE.search(reply)
+        found = list(ACTION_RE.finditer(reply))
+        m = found[-1] if found else None
         visible = self.world.chunk_links[self.page_id][self.chunk]
         self.message = ""
         if m and m.group("name"):
